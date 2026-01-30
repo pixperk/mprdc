@@ -33,8 +33,11 @@ type Task struct {
 	Type      TaskType
 	State     TaskState
 	Filename  string    // for input file (map tasks only)
-	Offset    int64     //start reading from here
-	Size      int64     //number of bytes to read
-	StartTime time.Time // to track task start time, we use time.Time for monotonic clock
+	Offset    int64     // start reading from here
+	Size      int64     // number of bytes to read
+	StartTime time.Time // when task was assigned (for timeout detection)
 
+	// retry with backoff
+	RetryCount int       // how many times this task has failed
+	RetryAfter time.Time // don't assign until after this time (backoff)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -111,16 +112,24 @@ func NewMaster(files []string, nReduce int, chunkSize int64, timeoutDuration tim
 // AssignTask is called by workers to get work
 // returns nil if no work available (worker should wait and retry)
 // priority: map tasks first, then reduce tasks (only after ALL maps complete)
+// respects backoff: tasks with RetryAfter in the future are skipped
 func (m *Master) AssignTask() *Task {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	now := time.Now()
 
 	// phase 1: assign map tasks first
 	// workers process input files and produce intermediate files
 	for i := range m.mapTasks {
 		if m.mapTasks[i].State == Idle {
+			// check backoff: skip if task is in cooldown period after failure
+			// this prevents rapid retries on persistent failures
+			if !now.After(m.mapTasks[i].RetryAfter) && m.mapTasks[i].RetryCount > 0 {
+				continue // still in backoff, try next task
+			}
 			m.mapTasks[i].State = InProgress
-			m.mapTasks[i].StartTime = time.Now() // for timeout detection
+			m.mapTasks[i].StartTime = now // for timeout detection
 			return &m.mapTasks[i]
 		}
 	}
@@ -136,8 +145,12 @@ func (m *Master) AssignTask() *Task {
 	// workers read intermediate files and produce final output
 	for i := range m.reduceTasks {
 		if m.reduceTasks[i].State == Idle {
+			// check backoff for reduce tasks too
+			if !now.After(m.reduceTasks[i].RetryAfter) && m.reduceTasks[i].RetryCount > 0 {
+				continue
+			}
 			m.reduceTasks[i].State = InProgress
-			m.reduceTasks[i].StartTime = time.Now()
+			m.reduceTasks[i].StartTime = now
 			return &m.reduceTasks[i]
 		}
 	}
@@ -185,16 +198,26 @@ func (m *Master) ReportDone(taskID int, taskType TaskType) {
 }
 
 // ReportFailed is called by workers when a task fails (e.g. file not found)
-// resets task to idle so another worker can retry it
+// resets task to idle with exponential backoff so another worker can retry later
+// backoff prevents rapid retry loops that waste resources on persistent failures
 func (m *Master) ReportFailed(taskID int, taskType TaskType) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// backoff constants
+	baseDelay := 1 * time.Second  // first retry after ~1s
+	maxDelay := 30 * time.Second  // cap at 30s to avoid excessive waits
 
 	switch taskType {
 	case MapTask:
 		for i := range m.mapTasks {
 			if m.mapTasks[i].ID == taskID {
 				m.mapTasks[i].State = Idle
+				m.mapTasks[i].RetryCount++
+				// set backoff: task won't be assigned until after this time
+				m.mapTasks[i].RetryAfter = time.Now().Add(
+					backoffWithJitter(m.mapTasks[i].RetryCount, baseDelay, maxDelay),
+				)
 				return
 			}
 		}
@@ -202,6 +225,10 @@ func (m *Master) ReportFailed(taskID int, taskType TaskType) {
 		for i := range m.reduceTasks {
 			if m.reduceTasks[i].ID == taskID {
 				m.reduceTasks[i].State = Idle
+				m.reduceTasks[i].RetryCount++
+				m.reduceTasks[i].RetryAfter = time.Now().Add(
+					backoffWithJitter(m.reduceTasks[i].RetryCount, baseDelay, maxDelay),
+				)
 				return
 			}
 		}
@@ -254,6 +281,26 @@ func (m *Master) startTimeoutChecker(timeoutDuration time.Duration) {
 			}
 		}
 	}()
+}
+
+// backoffWithJitter calculates exponential backoff with random jitter
+// formula: baseDelay * 2^retryCount + random jitter (0-50% of delay)
+// e.g. retry 0: 1s + jitter, retry 1: 2s + jitter, retry 2: 4s + jitter
+// jitter prevents thundering herd when multiple tasks fail simultaneously
+// capped at maxDelay to prevent infinite waits
+func backoffWithJitter(retryCount int, baseDelay, maxDelay time.Duration) time.Duration {
+	// exponential: 1s, 2s, 4s, 8s, ...
+	delay := baseDelay * (1 << retryCount) // 2^retryCount
+
+	// cap at max
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	// add jitter: 0-50% of delay
+	// this spreads out retries to avoid all failed tasks retrying at once
+	jitter := time.Duration(rand.Int63n(int64(delay / 2)))
+	return delay + jitter
 }
 
 // checkForTimeouts finds tasks that have been IN_PROGRESS too long
