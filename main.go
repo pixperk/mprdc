@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 func main() {
@@ -49,7 +50,7 @@ func RunMapReduce(
 	mapF MapFunc[string, string, string],
 	reduceF ReduceFunc[string, string],
 ) map[string]string {
-	master := NewMaster(files, nReduce)
+	master := NewMaster(files, nReduce, 10*time.Second)
 
 	// Spawn workers
 	var wg sync.WaitGroup

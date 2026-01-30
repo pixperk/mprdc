@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // mapfunc takes an input of type In and produces a slice of KeyValue pairs with key of type K and value of type V
 type MapFunc[In, K comparable, V any] func(In) []KeyValue[K, V]
 
@@ -27,8 +29,10 @@ const (
 )
 
 type Task struct {
-	ID       int
-	Type     TaskType
-	State    TaskState
-	Filename string // for map tasks
+	ID        int
+	Type      TaskType
+	State     TaskState
+	Filename  string    // for input file (map tasks only)
+	StartTime time.Time // to track task start time, we use time.Time for monotonic clock
+
 }
