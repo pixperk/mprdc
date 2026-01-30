@@ -99,6 +99,29 @@ func (m *Master) ReportDone(taskID int, taskType TaskType) {
 	}
 }
 
+// ReportFailed resets task to Idle so another worker can retry it
+func (m *Master) ReportFailed(taskID int, taskType TaskType) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch taskType {
+	case MapTask:
+		for i := range m.mapTasks {
+			if m.mapTasks[i].ID == taskID {
+				m.mapTasks[i].State = Idle
+				return
+			}
+		}
+	case ReduceTask:
+		for i := range m.reduceTasks {
+			if m.reduceTasks[i].ID == taskID {
+				m.reduceTasks[i].State = Idle
+				return
+			}
+		}
+	}
+}
+
 func (m *Master) NReduce() int {
 	return m.nReduce
 }
