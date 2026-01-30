@@ -33,6 +33,8 @@ type Task struct {
 	Type      TaskType
 	State     TaskState
 	Filename  string    // for input file (map tasks only)
+	Offset    int64     //start reading from here
+	Size      int64     //number of bytes to read
 	StartTime time.Time // to track task start time, we use time.Time for monotonic clock
 
 }

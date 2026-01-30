@@ -50,7 +50,12 @@ func RunMapReduce(
 	mapF MapFunc[string, string, string],
 	reduceF ReduceFunc[string, string],
 ) map[string]string {
-	master := NewMaster(files, nReduce, 10*time.Second)
+	// chunkSize: 64MB (set to 0 to disable splitting)
+	// for small test files, this means 1 task per file
+	// for large files (>64MB), they get split into multiple tasks
+	chunkSize := int64(64 * 1024 * 1024) // 64MB
+
+	master := NewMaster(files, nReduce, chunkSize, 10*time.Second)
 
 	// Spawn workers
 	var wg sync.WaitGroup
@@ -68,8 +73,8 @@ func RunMapReduce(
 	// Collect results
 	results := collectResults(nReduce)
 
-	// Clean up
-	cleanupIntermediateFiles(len(files), nReduce)
+	// Clean up - use NumMapTasks() because splitting may create more tasks than files
+	cleanupIntermediateFiles(master.NumMapTasks(), nReduce)
 	cleanupOutputFiles(nReduce)
 
 	return results

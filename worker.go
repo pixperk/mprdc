@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -59,16 +61,17 @@ func (w *Worker) Run() {
 }
 
 func (w *Worker) handleMapTask(task *Task) error {
-	// step 1: read input file
-	// e.g. task.Filename = "doc1.txt" containing "the quick brown fox"
-	inputData, err := os.ReadFile(task.Filename)
+	// step 1: read the chunk from input file
+	// task.Offset = where to start reading
+	// task.Size = how many bytes to read (0 means entire file)
+	inputData, err := w.readChunk(task.Filename, task.Offset, task.Size)
 	if err != nil {
 		return err
 	}
 
 	// step 2: apply user's map function to produce key-value pairs
 	// e.g. "the quick brown fox" -> [{"the","1"}, {"quick","1"}, {"brown","1"}, {"fox","1"}]
-	kvs := w.mapFunc(string(inputData))
+	kvs := w.mapFunc(inputData)
 
 	// step 3: partition kvs into nReduce buckets using hash(key) % nReduce
 	// this ensures same key always goes to same reduce task
@@ -100,6 +103,66 @@ func (w *Worker) handleMapTask(task *Task) error {
 	}
 
 	return nil
+}
+
+// readChunk reads a portion of a file from offset to offset+size
+// if size is 0, reads the entire file
+// for chunks in the middle of a file, we:
+//   - skip partial line at the start (previous chunk handles it)
+//   - extend to include complete line at the end
+// this ensures we don't split words/lines across chunks
+func (w *Worker) readChunk(filename string, offset, size int64) (string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	// if size is 0, read entire file (no chunking)
+	if size == 0 {
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+
+	// seek to the offset
+	_, err = file.Seek(offset, io.SeekStart)
+	if err != nil {
+		return "", err
+	}
+
+	reader := bufio.NewReader(file)
+
+	// if not at start of file, skip to next newline
+	// this avoids reading partial line from previous chunk
+	// e.g. if previous chunk ended mid-word, we skip that partial word
+	if offset > 0 {
+		_, err = reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+	}
+
+	// read up to 'size' bytes, then extend to end of line
+	// this ensures we get complete lines/words
+	var result []byte
+	bytesRead := int64(0)
+
+	for bytesRead < size {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		result = append(result, line...)
+		bytesRead += int64(len(line))
+		if err == io.EOF {
+			break
+		}
+	}
+
+	return string(result), nil
 }
 
 // ihash returns a deterministic hash for a key

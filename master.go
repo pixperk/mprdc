@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"sync"
 	"time"
 )
@@ -19,27 +20,77 @@ type Master struct {
 	stopChecker chan struct{} // closed to stop the timeout checker goroutine
 }
 
-// NewMaster creates a master with M map tasks (one per file) and R reduce tasks
-// e.g. NewMaster(["a.txt", "b.txt"], 3, 10s) creates:
-//   - 2 map tasks (M=2): process a.txt and b.txt
-//   - 3 reduce tasks (R=3): partitions 0, 1, 2
-//   - timeout checker that runs every 5s (timeout/2)
-func NewMaster(files []string, nReduce int, timeoutDuration time.Duration) *Master {
+// NewMaster creates a master with M map tasks and R reduce tasks
+// files are split into chunks of chunkSize bytes (e.g. 64MB)
+// e.g. a 150MB file with chunkSize=64MB creates 3 map tasks:
+//   - task 0: bytes 0-64MB
+//   - task 1: bytes 64MB-128MB
+//   - task 2: bytes 128MB-150MB
+// if chunkSize <= 0, entire file is one task (no splitting)
+func NewMaster(files []string, nReduce int, chunkSize int64, timeoutDuration time.Duration) *Master {
 	m := &Master{
 		nReduce:     nReduce,
 		done:        make(chan struct{}),
 		stopChecker: make(chan struct{}),
 	}
 
-	// create one map task per input file
-	// each map task will read its file, apply mapFunc, and write intermediate files
-	for i, file := range files {
-		m.mapTasks = append(m.mapTasks, Task{
-			ID:       i,
-			Type:     MapTask,
-			State:    Idle,
-			Filename: file,
-		})
+	// create map tasks by splitting each file into chunks
+	// each chunk becomes a separate map task
+	// this allows large files to be processed in parallel
+	taskID := 0
+	for _, file := range files {
+		fileInfo, err := os.Stat(file)
+		if err != nil {
+			// file doesn't exist yet or error - create single task for whole file
+			// worker will handle the error when it tries to read
+			m.mapTasks = append(m.mapTasks, Task{
+				ID:       taskID,
+				Type:     MapTask,
+				State:    Idle,
+				Filename: file,
+				Offset:   0,
+				Size:     0, // 0 means read entire file
+			})
+			taskID++
+			continue
+		}
+
+		fileSize := fileInfo.Size()
+
+		// if chunkSize <= 0 or file is smaller than chunk, don't split
+		if chunkSize <= 0 || fileSize <= chunkSize {
+			m.mapTasks = append(m.mapTasks, Task{
+				ID:       taskID,
+				Type:     MapTask,
+				State:    Idle,
+				Filename: file,
+				Offset:   0,
+				Size:     fileSize,
+			})
+			taskID++
+			continue
+		}
+
+		// split file into chunks
+		// e.g. 150MB file with 64MB chunks:
+		//   chunk 0: offset=0, size=64MB
+		//   chunk 1: offset=64MB, size=64MB
+		//   chunk 2: offset=128MB, size=22MB (remaining)
+		for offset := int64(0); offset < fileSize; offset += chunkSize {
+			size := chunkSize
+			if offset+size > fileSize {
+				size = fileSize - offset // last chunk may be smaller
+			}
+			m.mapTasks = append(m.mapTasks, Task{
+				ID:       taskID,
+				Type:     MapTask,
+				State:    Idle,
+				Filename: file,
+				Offset:   offset,
+				Size:     size,
+			})
+			taskID++
+		}
 	}
 
 	// create R reduce tasks (one per partition)
